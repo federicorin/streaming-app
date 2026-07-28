@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>Ver transmisiones</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  body { font-family: sans-serif; padding: 20px; max-width: 600px; margin: 0 auto; }
+  .item {
+    display: block; padding: 15px; margin: 8px 0;
+    background: #eee; text-decoration: none; color: #000;
+    border-radius: 4px; border: 1px solid #ccc;
+  }
+  .item:hover { background: #ddd; }
+  .empty { color: #666; font-style: italic; }
+  .meta { color: #555; font-size: 0.9em; }
+</style>
+</head>
+<body>
+<p><a href="/">&larr; Volver</a></p>
+<h1>Transmisiones activas</h1>
+<div id="list"></div>
+
+<script>
+const listEl = document.getElementById('list');
+
+function fmtSecs(s) {
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  const r = s % 60;
+  return `${m}m ${r}s`;
+}
+
+async function refresh() {
+  try {
+    const res = await fetch('/api/streams');
+    const streams = await res.json();
+    if (streams.length === 0) {
+      listEl.innerHTML = '<p class="empty">No hay transmisiones activas.</p>';
+      return;
+    }
+    listEl.innerHTML = streams.map(s => {
+      const secs = Math.floor((Date.now() - s.createdAt) / 1000);
+      return `<a class="item" href="/${s.id}">` +
+        `<b>Stream ${s.id}</b>` +
+        `<div class="meta">Fuente: ${s.kind} &middot; ${s.viewers} viewer(s) &middot; activo hace ${fmtSecs(secs)}</div>` +
+        `</a>`;
+    }).join('');
+  } catch (e) {
+    listEl.innerHTML = '<p class="empty">Error al cargar la lista.</p>';
+  }
+}
+
+refresh();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>

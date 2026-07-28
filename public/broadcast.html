@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>Transmitir</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  body { font-family: sans-serif; padding: 20px; max-width: 900px; margin: 0 auto; }
+  button { padding: 12px 20px; margin: 5px; font-size: 1em; cursor: pointer; }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  video { width: 100%; background: #000; margin-top: 15px; max-height: 60vh; }
+  #info { margin-top: 15px; padding: 10px; background: #eef; border: 1px solid #ccd; }
+  #info a { font-size: 1.1em; word-break: break-all; }
+  .hidden { display: none; }
+  .note { color: #c00; font-size: 0.9em; }
+  .status { margin-top: 10px; font-family: monospace; font-size: 0.9em; color: #444; }
+</style>
+</head>
+<body>
+<p><a href="/">&larr; Volver</a></p>
+<h1>Transmitir</h1>
+
+<div id="controls">
+  <button id="btn-camera">Cámara</button>
+  <button id="btn-screen">Pantalla / ventana / pestaña</button>
+  <p id="ios-note" class="note hidden">En iOS solo funciona la cámara (compartir pantalla no está soportado).</p>
+</div>
+
+<div id="active" class="hidden">
+  <div id="info"></div>
+  <button id="btn-stop">Detener transmisión</button>
+  <video id="preview" autoplay muted playsinline></video>
+  <p class="status"><span id="capture-info">Capturando: ?</span></p>
+  <p class="status">Viewers conectados: <span id="viewer-count">0</span></p>
+</div>
+
+<script>
+const rtcConfig = {
+  iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+};
+
+// Inserta / reemplaza `b=AS:<kbps>` en la sección m=video del SDP
+// para que Chrome no capee el bitrate en ~300 kbps.
+function forceVideoBitrate(sdp, kbps) {
+  const lines = sdp.split('\r\n');
+  const out = [];
+  let inVideo = false;
+  for (const line of lines) {
+    if (line.startsWith('m=video')) inVideo = true;
+    else if (line.startsWith('m=')) inVideo = false;
+    if (inVideo && line.startsWith('b=AS:')) continue; // remove existing
+    out.push(line);
+    // insertar b=AS justo después de la c= de la sección video
+    if (inVideo && line.startsWith('c=')) {
+      out.push(`b=AS:${kbps}`);
+    }
+  }
+  return out.join('\r\n');
+}
+
+let ws = null;
+let localStream = null;
+let streamId = null;
+const peerConnections = new Map();       // viewerId -> RTCPeerConnection
+const pendingCandidates = new Map();     // viewerId -> Array<candidate>
+const hasRemote = new Map();             // viewerId -> boolean
+
+const btnCamera = document.getElementById('btn-camera');
+const btnScreen = document.getElementById('btn-screen');
+const btnStop = document.getElementById('btn-stop');
+const controls = document.getElementById('controls');
+const active = document.getElementById('active');
+const info = document.getElementById('info');
+const preview = document.getElementById('preview');
+const viewerCountEl = document.getElementById('viewer-count');
+const iosNote = document.getElementById('ios-note');
+
+const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
+if (isIOS || !navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+  btnScreen.disabled = true;
+  iosNote.classList.remove('hidden');
+}
+
+btnCamera.onclick = () => start('camera');
+btnScreen.onclick = () => start('screen');
+btnStop.onclick = () => stop();
+
+async function start(kind) {
+  try {
+    if (kind === 'camera') {
+      // Camera: 1080p60 ideal (degrada solo si la cámara no lo soporta)
+      localStream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          width:     { ideal: 1920 },
+          height:    { ideal: 1080 },
+          frameRate: { ideal: 60 }
+        },
+        audio: true
+      });
+    } else {
+      // Screen: sin capear resolución (nativa del monitor), solo pido 60fps
+      localStream = await navigator.mediaDevices.getDisplayMedia({
+        video: { frameRate: { ideal: 60 } },
+        audio: true
+      });
+    }
+  } catch (e) {
+    alert('No se pudo capturar: ' + e.message);
+    return;
+  }
+
+  preview.srcObject = localStream;
+  const vTrack = localStream.getVideoTracks()[0];
+  vTrack.addEventListener('ended', () => stop());
+
+  // Log & show actual capture settings (util para diagnosticar)
+  const s = vTrack.getSettings();
+  console.log('Capture settings:', s);
+  document.getElementById('capture-info').textContent =
+    `Capturando: ${s.width || '?'}×${s.height || '?'} @ ${s.frameRate || '?'}fps`;
+
+  connectWS(kind);
+}
+
+function connectWS(kind) {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(`${proto}//${location.host}/ws`);
+
+  ws.onopen = () => {
+    ws.send(JSON.stringify({ type: 'broadcaster-hello', kind }));
+  };
+
+  ws.onmessage = async (event) => {
+    const msg = JSON.parse(event.data);
+    switch (msg.type) {
+      case 'assigned': {
+        streamId = msg.streamId;
+        const url = `${location.origin}/${streamId}`;
+        info.innerHTML =
+          `Transmitiendo como stream <b>${streamId}</b>.<br>` +
+          `Compartir: <a href="${url}" target="_blank">${url}</a>`;
+        controls.classList.add('hidden');
+        active.classList.remove('hidden');
+        break;
+      }
+      case 'viewer-joined':
+        await handleViewerJoined(msg.viewerId);
+        break;
+      case 'answer':
+        await handleAnswer(msg.viewerId, msg.sdp);
+        break;
+      case 'ice':
+        await handleIce(msg.viewerId, msg.candidate);
+        break;
+      case 'viewer-left':
+        removeViewer(msg.viewerId);
+        break;
+    }
+  };
+
+  ws.onclose = () => {
+    // if server dropped us, just stop cleanly
+    if (streamId !== null) stop();
+  };
+}
+
+async function handleViewerJoined(viewerId) {
+  const pc = new RTCPeerConnection(rtcConfig);
+  peerConnections.set(viewerId, pc);
+  pendingCandidates.set(viewerId, []);
+  hasRemote.set(viewerId, false);
+
+  for (const track of localStream.getTracks()) {
+    pc.addTrack(track, localStream);
+  }
+
+  // Bump video bitrate for 720p (default ~300 kbps is far too low)
+  const videoSender = pc.getSenders().find(s => s.track && s.track.kind === 'video');
+  if (videoSender) {
+    const params = videoSender.getParameters();
+    if (!params.encodings || params.encodings.length === 0) params.encodings = [{}];
+    params.encodings[0].maxBitrate = 8_000_000; // 8 Mbps (para 1080p60)
+    params.encodings[0].maxFramerate = 60;
+    try { await videoSender.setParameters(params); } catch (e) { console.warn('setParameters', e); }
+  }
+
+  pc.onicecandidate = (e) => {
+    if (e.candidate) {
+      ws.send(JSON.stringify({ type: 'ice', viewerId, candidate: e.candidate }));
+    }
+  };
+
+  pc.onconnectionstatechange = () => {
+    if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
+      removeViewer(viewerId);
+    }
+  };
+
+  const offer = await pc.createOffer();
+  offer.sdp = forceVideoBitrate(offer.sdp, 8000); // 8000 kbps = 8 Mbps (1080p60)
+  await pc.setLocalDescription(offer);
+  ws.send(JSON.stringify({ type: 'offer', viewerId, sdp: offer }));
+
+  updateViewerCount();
+}
+
+async function handleAnswer(viewerId, sdp) {
+  const pc = peerConnections.get(viewerId);
+  if (!pc) return;
+  await pc.setRemoteDescription(sdp);
+  hasRemote.set(viewerId, true);
+  const queued = pendingCandidates.get(viewerId) || [];
+  for (const c of queued) {
+    try { await pc.addIceCandidate(c); } catch (e) { console.warn('ICE err', e); }
+  }
+  pendingCandidates.set(viewerId, []);
+}
+
+async function handleIce(viewerId, candidate) {
+  const pc = peerConnections.get(viewerId);
+  if (!pc) return;
+  if (hasRemote.get(viewerId)) {
+    try { await pc.addIceCandidate(candidate); } catch (e) { console.warn('ICE err', e); }
+  } else {
+    pendingCandidates.get(viewerId).push(candidate);
+  }
+}
+
+function removeViewer(viewerId) {
+  const pc = peerConnections.get(viewerId);
+  if (pc) {
+    pc.close();
+    peerConnections.delete(viewerId);
+    pendingCandidates.delete(viewerId);
+    hasRemote.delete(viewerId);
+    updateViewerCount();
+  }
+}
+
+function updateViewerCount() {
+  viewerCountEl.textContent = peerConnections.size;
+}
+
+function stop() {
+  for (const pc of peerConnections.values()) pc.close();
+  peerConnections.clear();
+  pendingCandidates.clear();
+  hasRemote.clear();
+  if (localStream) {
+    for (const t of localStream.getTracks()) t.stop();
+    localStream = null;
+  }
+  if (ws && ws.readyState <= 1) ws.close();
+  ws = null;
+  streamId = null;
+  active.classList.add('hidden');
+  controls.classList.remove('hidden');
+  info.innerHTML = '';
+  preview.srcObject = null;
+  updateViewerCount();
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>Ver stream</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  body { font-family: sans-serif; padding: 20px; max-width: 1000px; margin: 0 auto; }
+  video { width: 100%; background: #000; max-height: 80vh; }
+  #status { padding: 10px; margin: 10px 0; background: #eee; font-family: monospace; font-size: 0.9em; }
+</style>
+</head>
+<body>
+<p><a href="/watch">&larr; Volver a la lista</a></p>
+<div id="status">Conectando...</div>
+<video id="video" autoplay playsinline controls></video>
+
+<script>
+const rtcConfig = {
+  iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+};
+
+const streamId = parseInt(location.pathname.substring(1), 10);
+const video = document.getElementById('video');
+const statusEl = document.getElementById('status');
+
+let pc = null;
+let ws = null;
+let hasRemote = false;
+const pendingCandidates = [];
+
+function setStatus(text) { statusEl.textContent = text; }
+
+async function start() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(`${proto}//${location.host}/ws`);
+
+  pc = new RTCPeerConnection(rtcConfig);
+
+  pc.ontrack = (e) => {
+    video.srcObject = e.streams[0];
+    setStatus(`Conectado al stream ${streamId}`);
+  };
+
+  pc.onicecandidate = (e) => {
+    if (e.candidate && ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'ice', candidate: e.candidate }));
+    }
+  };
+
+  pc.onconnectionstatechange = () => {
+    if (pc.connectionState === 'failed') {
+      setStatus('Conexión fallida. Puede ser un NAT restrictivo.');
+    } else if (pc.connectionState === 'disconnected') {
+      setStatus('Desconectado.');
+    }
+  };
+
+  ws.onopen = () => {
+    ws.send(JSON.stringify({ type: 'viewer-hello', streamId }));
+    setStatus(`Solicitando stream ${streamId}...`);
+  };
+
+  ws.onmessage = async (event) => {
+    const msg = JSON.parse(event.data);
+    switch (msg.type) {
+      case 'offer': {
+        await pc.setRemoteDescription(msg.sdp);
+        hasRemote = true;
+        for (const c of pendingCandidates) {
+          try { await pc.addIceCandidate(c); } catch (e) { console.warn(e); }
+        }
+        pendingCandidates.length = 0;
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        ws.send(JSON.stringify({ type: 'answer', sdp: answer }));
+        break;
+      }
+      case 'ice': {
+        if (hasRemote) {
+          try { await pc.addIceCandidate(msg.candidate); } catch (e) { console.warn(e); }
+        } else {
+          pendingCandidates.push(msg.candidate);
+        }
+        break;
+      }
+      case 'stream-ended':
+        setStatus(`El stream ${streamId} terminó.`);
+        cleanup();
+        break;
+    }
+  };
+
+  ws.onclose = () => {
+    if (pc && pc.connectionState !== 'connected') {
+      setStatus('Desconectado del servidor.');
+    }
+  };
+}
+
+function cleanup() {
+  if (pc) { pc.close(); pc = null; }
+  if (ws) { ws.close(); ws = null; }
+}
+
+window.addEventListener('beforeunload', cleanup);
+
+if (isNaN(streamId)) {
+  setStatus('ID de stream inválido.');
+} else {
+  start();
+}
+</script>
+</body>
+</html>
