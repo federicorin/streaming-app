@@ -5,14 +5,37 @@
 <title>Ver stream</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-  body { font-family: sans-serif; padding: 20px; max-width: 1000px; margin: 0 auto; }
-  video { width: 100%; background: #000; max-height: 80vh; }
-  #status { padding: 10px; margin: 10px 0; background: #eee; font-family: monospace; font-size: 0.9em; }
+  html, body {
+    margin: 0; padding: 0; height: 100%; width: 100%;
+    background: #000; overflow: hidden; font-family: sans-serif;
+  }
+  #video {
+    width: 100vw; height: 100vh;
+    object-fit: contain; background: #000;
+    display: block;
+  }
+  /* Overlay superior con back link + status.
+     Semi-transparente y sale del camino al hacer hover fuera. */
+  #overlay {
+    position: fixed; top: 0; left: 0; right: 0;
+    padding: 10px 15px;
+    background: rgba(0, 0, 0, 0.45);
+    color: #fff; font-size: 0.9em;
+    display: flex; gap: 15px; align-items: center;
+    z-index: 10;
+    transition: opacity 0.4s ease;
+  }
+  #overlay a { color: #9cf; text-decoration: none; }
+  #overlay a:hover { text-decoration: underline; }
+  #overlay.hidden { opacity: 0; pointer-events: none; }
+  #status { font-family: monospace; }
 </style>
 </head>
 <body>
-<p><a href="/watch">&larr; Volver a la lista</a></p>
-<div id="status">Conectando...</div>
+<div id="overlay">
+  <a href="/watch">&larr; Volver</a>
+  <span id="status">Conectando...</span>
+</div>
 <video id="video" autoplay playsinline controls></video>
 
 <script>
@@ -110,6 +133,19 @@ if (isNaN(streamId)) {
 } else {
   start();
 }
+
+// Auto-hide del overlay tras 3s de inactividad
+const overlay = document.getElementById('overlay');
+let hideTimer = null;
+function showOverlay() {
+  overlay.classList.remove('hidden');
+  clearTimeout(hideTimer);
+  hideTimer = setTimeout(() => overlay.classList.add('hidden'), 3000);
+}
+['mousemove', 'touchstart', 'keydown'].forEach(ev =>
+  document.addEventListener(ev, showOverlay)
+);
+showOverlay();
 </script>
 </body>
 </html>
