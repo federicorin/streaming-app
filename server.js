@@ -48,7 +48,7 @@ app.get('/watch', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'watch.html'));
 });
 
-app.get(/^\/(\d+)$/, (req, res) => {
+app.get(/^\/(\d+)\/?$/, (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'stream.html'));
 });
 
